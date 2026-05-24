@@ -1,0 +1,198 @@
+{
+  "name": "AI Ticket Classifier & Router",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "classify-ticket",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "6c242160-10a5-41dd-a129-748d78022935",
+      "name": "Incoming Ticket",
+      "webhookId": "bb61800d-a3d3-411c-a44b-e1526c094380"
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json.body || $input.first().json;\n\nreturn [\n  {\n    json: {\n      ticket_id: input.ticket_id,\n      customer_id: input.customer_id || null,\n      customer_tier: input.customer_tier || \"standard\",\n      channel: input.channel || \"unknown\",\n      message: input.message || \"\",\n      created_at: input.created_at || new Date().toISOString()\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        208,
+        0
+      ],
+      "id": "11ea2bae-d9f4-45c9-8ab3-e889408900ff",
+      "name": "Normalize Incoming Ticket"
+    },
+    {
+      "parameters": {
+        "jsCode": "const normalizedTicket = $('Normalize Incoming Ticket').first().json;\n\n// Gemini node response path\nconst raw =\n  $json.candidates?.[0]?.content?.parts?.[0]?.text ||\n  $json.output ||\n  $json.text ||\n  $json.content ||\n  $json.message?.content ||\n  $json.choices?.[0]?.message?.content;\n\nif (!raw) {\n  throw new Error(\"AI response text not found: \" + JSON.stringify($json));\n}\n\n// на случай если модель вдруг завернёт JSON в ```json\nconst cleaned = String(raw)\n  .replace(/```json/g, \"\")\n  .replace(/```/g, \"\")\n  .trim();\n\nlet classification;\n\ntry {\n  classification = JSON.parse(cleaned);\n} catch (error) {\n  throw new Error(\"AI returned invalid JSON: \" + raw);\n}\n\nreturn [\n  {\n    json: {\n      ...normalizedTicket,\n      classification\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        768,
+        0
+      ],
+      "id": "3f0fa133-34f1-4d23-b55b-96f24e90847e",
+      "name": "Parse AI Classification"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nconst c = item.classification || {};\n\nconst allowedCategories = [\n  \"billing\",\n  \"technical_issue\",\n  \"account_access\",\n  \"feature_request\",\n  \"complaint\",\n  \"how_to_question\",\n  \"other\"\n];\n\nconst allowedIntents = [\n  \"refund_request\",\n  \"payment_failed\",\n  \"duplicate_charge\",\n  \"login_problem\",\n  \"bug_report\",\n  \"setup_question\",\n  \"cancel_subscription\",\n  \"angry_complaint\",\n  \"unknown\"\n];\n\nconst allowedPriorities = [\"low\", \"medium\", \"high\", \"urgent\"];\nconst allowedSentiments = [\"positive\", \"neutral\", \"negative\"];\n\nlet category = allowedCategories.includes(c.category) ? c.category : \"other\";\nlet intent = allowedIntents.includes(c.intent) ? c.intent : \"unknown\";\nlet priority = allowedPriorities.includes(c.priority) ? c.priority : \"medium\";\nlet sentiment = allowedSentiments.includes(c.sentiment) ? c.sentiment : \"neutral\";\n\nconst confidence = Number(c.confidence || 0);\n\n// deterministic business rules\nif (\n  category === \"billing\" &&\n  [\"refund_request\", \"duplicate_charge\", \"payment_failed\"].includes(intent)\n) {\n  sentiment = \"negative\";\n}\n\nif (\n  item.customer_tier === \"premium\" &&\n  category === \"billing\" &&\n  [\"refund_request\", \"duplicate_charge\", \"payment_failed\"].includes(intent)\n) {\n  priority = [\"high\", \"urgent\"].includes(priority) ? priority : \"high\";\n}\n\nif (category === \"account_access\" || intent === \"login_problem\") {\n  priority = [\"high\", \"urgent\"].includes(priority) ? priority : \"high\";\n}\n\nif (category === \"complaint\" || intent === \"angry_complaint\") {\n  priority = [\"high\", \"urgent\"].includes(priority) ? priority : \"high\";\n  sentiment = \"negative\";\n}\n\nconst needsHuman =\n  c.needs_human === true ||\n  confidence < 0.75 ||\n  category === \"other\" ||\n  intent === \"unknown\";\n\nreturn [\n  {\n    json: {\n      ...item,\n      classification: {\n        category,\n        intent,\n        priority,\n        sentiment,\n        language: c.language || \"unknown\",\n        needs_human: needsHuman,\n        confidence,\n        summary: c.summary || \"\"\n      }\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        976,
+        0
+      ],
+      "id": "bdfb056d-1b45-4c97-a230-a60c8346854e",
+      "name": "Validate Classification"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "",
+          "cachedResultName": "",
+          "cachedResultUrl": ""
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=You are a support ticket classification engine.\n\nClassify this customer support ticket and return ONLY valid JSON.\nDo not use markdown.\nDo not wrap JSON in code fences.\nDo not add explanations.\n\nAllowed categories:\nbilling, technical_issue, account_access, feature_request, complaint, how_to_question, other\n\nAllowed intents:\nrefund_request, payment_failed, duplicate_charge, login_problem, bug_report, setup_question, cancel_subscription, angry_complaint, unknown\n\nAllowed priorities:\nlow, medium, high, urgent\n\nAllowed sentiments:\npositive, neutral, negative\n\nRules:\n- premium customers with billing/refund/duplicate charge issues should be at least high priority.\n- angry complaints should be at least high priority.\n- login/account access issues should be high priority.\n- if confidence is below 0.75, set needs_human to true.\n- if category is other or intent is unknown, set needs_human to true.\n\nTicket ID: {{ $json.ticket_id }}\nCustomer tier: {{ $json.customer_tier }}\nChannel: {{ $json.channel }}\nMessage: {{ $json.message }}\n\nReturn JSON with this exact structure:\n{\n  \"category\": \"\",\n  \"intent\": \"\",\n  \"priority\": \"\",\n  \"sentiment\": \"\",\n  \"language\": \"\",\n  \"needs_human\": true,\n  \"confidence\": 0.0,\n  \"summary\": \"\"\n}"
+            }
+          ]
+        },
+        "simplify": false,
+        "jsonOutput": true,
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.googleGemini",
+      "typeVersion": 1.2,
+      "position": [
+        416,
+        0
+      ],
+      "id": "d7ed581e-24d4-44ad-8225-d98e563531a4",
+      "name": "Gemini — Classify Ticket"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1392,
+        0
+      ],
+      "id": "d39c1926-fbe2-4533-9039-c66b7abf55cf",
+      "name": "Respond to Webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nconst c = item.classification;\n\nlet queue = \"General Support\";\nlet assignee_group = \"support_l1\";\nlet routing_reason = \"Default routing\";\n\nif (c.needs_human && c.confidence < 0.75) {\n  queue = \"Human Review\";\n  assignee_group = \"support_triage\";\n  routing_reason = \"Low confidence classification requires human review\";\n} else if (c.category === \"billing\") {\n  queue = \"Billing Support\";\n  assignee_group = [\"high\", \"urgent\"].includes(c.priority)\n    ? \"billing_l2\"\n    : \"billing_l1\";\n  routing_reason = \"Billing-related ticket\";\n} else if (c.category === \"technical_issue\") {\n  queue = \"Technical Support\";\n  assignee_group = c.priority === \"urgent\"\n    ? \"tech_l2\"\n    : \"tech_l1\";\n  routing_reason = \"Technical issue detected\";\n} else if (c.category === \"account_access\") {\n  queue = \"Account Access\";\n  assignee_group = \"identity_support\";\n  routing_reason = \"Account access or login issue\";\n} else if (c.category === \"feature_request\") {\n  queue = \"Product Feedback\";\n  assignee_group = \"product_ops\";\n  routing_reason = \"Feature request should go to product feedback\";\n} else if (c.category === \"complaint\") {\n  queue = \"Escalations\";\n  assignee_group = \"support_l2\";\n  routing_reason = \"Complaint requires escalation\";\n} else if (c.category === \"how_to_question\") {\n  queue = \"General Support\";\n  assignee_group = \"support_l1\";\n  routing_reason = \"How-to question for first-line support\";\n} else {\n  queue = \"Human Review\";\n  assignee_group = \"support_triage\";\n  routing_reason = \"Unknown category\";\n}\n\nreturn [\n  {\n    json: {\n      ...item,\n      routing: {\n        queue,\n        assignee_group,\n        routing_reason,\n        routed_at: new Date().toISOString()\n      }\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1184,
+        0
+      ],
+      "id": "eed7fb7c-c944-418b-a6d3-2c4459488b47",
+      "name": "Route Ticket"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Incoming Ticket": {
+      "main": [
+        [
+          {
+            "node": "Normalize Incoming Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Incoming Ticket": {
+      "main": [
+        [
+          {
+            "node": "Gemini — Classify Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse AI Classification": {
+      "main": [
+        [
+          {
+            "node": "Validate Classification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini — Classify Ticket": {
+      "main": [
+        [
+          {
+            "node": "Parse AI Classification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Classification": {
+      "main": [
+        [
+          {
+            "node": "Route Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Ticket": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "227ccb02-4367-49ca-84b5-6ca73aff40fc",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "b270ddadbbd20edbacb4a7c87f35f805f2e41d5b6b457528215170ab2d01cbd0"
+  },
+  "id": "mXNP2HaTOCZ2vmis",
+  "tags": []
+}
